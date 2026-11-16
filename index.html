@@ -251,14 +251,29 @@ function setStatus(d, text, cls){
 }
 
 async function addSensor(){
-  if (!navigator.bluetooth){ showBanner(); return; }
+  if (!navigator.bluetooth || !window.isSecureContext){
+    showBanner();
+    alert($('#banner').textContent);
+    return;
+  }
   const opts = $('#all').checked
     ? {acceptAllDevices:true, optionalServices:OPT_SERVICES}
     : {filters:[{namePrefix:'RABBONI'},{namePrefix:'Rabboni'},{namePrefix:'rabboni'},{namePrefix:'Bboni'},{namePrefix:'BBONI'},
                 {services:[UUID.newSvc]},{services:[0x1600]},{services:[0xfff0]}], optionalServices:OPT_SERVICES};
   let dev;
   try { dev = await navigator.bluetooth.requestDevice(opts); }
-  catch(e){ log('未選擇裝置：' + e.message); return; }
+  catch(e){
+    log(`未選擇裝置：${e.name} ${e.message}`);
+    if (/cancel/i.test(e.message)) return;          // 使用者自己按了取消
+    let why = `無法開啟藍牙裝置清單（${e.name}：${e.message}）`;
+    try {
+      if (navigator.bluetooth.getAvailability && !(await navigator.bluetooth.getAvailability()))
+        why += '\n\n手機的藍牙沒有開啟，或沒有允許這個 App 使用藍牙：請到「設定 → 隱私權與安全性 → 藍牙」開啟。';
+    } catch(_){}
+    if (e.name === 'NotFoundError') why += '\n\n附近找不到感測器：確認感測器在閃燈、沒有被其他手機或 App 連著；或勾選「列出所有藍牙裝置」再試。';
+    alert(why);
+    return;
+  }
   if (devices.some(x => x.dev === dev || (x.dev && x.dev.id === dev.id))){ alert('這顆已經在清單裡了'); return; }
   const d = makeDevice(dev);
   dev.addEventListener('gattserverdisconnected', () => onDisconnect(d));
@@ -799,7 +814,7 @@ function showBanner(){
   b.style.display = 'block';
   b.textContent = !window.isSecureContext
     ? '網頁必須用 https:// 開啟才能使用藍牙。'
-    : '這個瀏覽器不支援網頁藍牙。iPhone 請用 Bluefy 開啟這個網址；電腦請用 Chrome 或 Edge。示範模式仍可使用。';
+    : '這個瀏覽器不支援網頁藍牙。iPhone 的 Safari、Chrome 都不行，請到 App Store 下載「Bluefy」，用 Bluefy 開啟這個網址；電腦請用 Chrome 或 Edge。示範模式仍可使用。';
 }
 if (!navigator.bluetooth || !window.isSecureContext) showBanner();
 window.addEventListener('beforeunload', e => { if (rows.length){ e.preventDefault(); e.returnValue = ''; } });
