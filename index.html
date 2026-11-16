@@ -187,15 +187,27 @@ function log(msg){
 }
 function cfg(){ return {acc:+$('#acc').value, gyr:+$('#gyr').value, rate:+$('#rate').value, write:$('#writeCfg').checked}; }
 function hex(dv){ let s=''; for (let i=0;i<dv.byteLength;i++) s += dv.getUint8(i).toString(16).padStart(2,'0'); return s; }
-function props(c){ return ['read','write','writeWithoutResponse','notify','indicate'].filter(k => c.properties[k]).join('/'); }
+// 不同瀏覽器回報的 UUID 格式不同（Chrome：完整小寫；Bluefy 可能是大寫或 4 碼簡寫），一律轉成完整小寫再比對
+function uu(u){
+  let s = String(u == null ? '' : u).trim().toLowerCase().replace(/^0x/, '');
+  if (/^[0-9a-f]{4}$/.test(s)) s = '0000' + s;
+  if (/^[0-9a-f]{8}$/.test(s)) s += '-0000-1000-8000-00805f9b34fb';
+  return s;
+}
+const short = u => { const s = uu(u); return /^0000[0-9a-f]{4}-0000-1000-8000-00805f9b34fb$/.test(s) ? s.slice(4, 8) : s; };
+// 有些瀏覽器沒有提供 properties，視為全部可用，改用 UUID 順序判斷用途
+const ANY_PROPS = {read:true, write:true, writeWithoutResponse:true, notify:true, indicate:true};
+function pr(c){ return (c && c.properties) || ANY_PROPS; }
+function props(c){ return c && c.properties ? ['read','write','writeWithoutResponse','notify','indicate'].filter(k => c.properties[k]).join('/') : '(無屬性資訊)'; }
 
 // 15 bytes，與 PS Spine 使用的範本相同：45 aa gg 01 12 01 01 00 00 rr 00 00 00 09 C4
 function buildConfig(c){
   return new Uint8Array([0x45, ACC_CODE[c.acc], GYR_CODE[c.gyr], 0x01,0x12,0x01,0x01,0x00,0x00, RATE_CODE[c.rate], 0x00,0x00,0x00,0x09,0xC4]);
 }
 async function writeChar(ch, buf){
-  if (ch.properties.write && ch.writeValueWithResponse) return ch.writeValueWithResponse(buf);
-  if (!ch.properties.write && ch.properties.writeWithoutResponse && ch.writeValueWithoutResponse) return ch.writeValueWithoutResponse(buf);
+  const p = pr(ch);
+  if (p.write && ch.writeValueWithResponse) return ch.writeValueWithResponse(buf);
+  if (!p.write && p.writeWithoutResponse && ch.writeValueWithoutResponse) return ch.writeValueWithoutResponse(buf);
   return ch.writeValue(buf);
 }
 
@@ -345,25 +357,36 @@ async function setup(d){
   setStatus(d, '連線中…', 'warn');
   try {
     const server = await d.dev.gatt.connect();
-    const svcs = await server.getPrimaryServices();
+    let svcs = [];
+    try { svcs = Array.from(await server.getPrimaryServices() || []); }
+    catch(e){ log(`${d.tag} 一次取得全部服務失敗：${describeErr(e)}`); }
+    log(`${d.tag} 取得 ${svcs.length} 個服務：${svcs.map(s => short(s.uuid)).join(' ')}`);
+    // 取不到或找不到數據服務時，改成一個一個服務去要
+    if (!svcs.some(s => uu(s.uuid) === uu(0x1600) || uu(s.uuid) === UUID.newSvc)){
+      for (const u of OPT_SERVICES){
+        if (svcs.some(s => uu(s.uuid) === u)) continue;
+        try { svcs.push(await server.getPrimaryService(u)); log(`${d.tag} 個別取得服務 ${short(u)}`); }
+        catch(e){ log(`${d.tag} 個別取得服務 ${short(u)} 失敗：${describeErr(e)}`); }
+      }
+    }
     const chars = [];
     for (const s of svcs){
       try {
-        for (const ch of await s.getCharacteristics()){
+        for (const ch of Array.from(await s.getCharacteristics() || [])){
           chars.push(ch);
-          log(`${d.tag} ${s.uuid} → ${ch.uuid} [${props(ch)}]`);
+          log(`${d.tag} ${short(s.uuid)} → ${short(ch.uuid)} [${props(ch)}]`);
         }
-      } catch(e){ log(`${d.tag} 讀 ${s.uuid} 失敗：${e.message}`); }
+      } catch(e){ log(`${d.tag} 讀 ${short(s.uuid)} 失敗：${describeErr(e)}`); }
     }
-    const find = u => chars.find(c => c.uuid === u);
-    const pick = (list, ...ps) => { for (const u of list){ const c = find(u); if (c && ps.some(p => c.properties[p])) return c; } return null; };
+    const find = u => chars.find(c => uu(c.uuid) === uu(u));
+    const pick = (list, ...ps) => { for (const u of list){ const c = find(u); if (c && ps.some(p => pr(c)[p])) return c; } return null; };
     const notifyC = pick([UUID.newB, UUID.newA, UUID.oldData], 'notify', 'indicate');
     const writeC  = pick([UUID.newA, UUID.newB, UUID.oldWrite], 'write', 'writeWithoutResponse');
     const replyC  = pick([UUID.oldReply, UUID.bbReply], 'notify', 'indicate');
     const battC   = find(UUID.battery);
     d.cfgReadC    = find(UUID.cfgRead);
     await readDeviceInfo(d, find);
-    if (!notifyC) throw new Error('找不到數據 characteristic（展開「除錯紀錄」看裝置有哪些 UUID）');
+    if (!notifyC) throw new Error(`找不到數據 characteristic（找到 ${svcs.length} 個服務、${chars.length} 個 characteristic；展開「除錯紀錄」看詳細內容）`);
 
     if (d.notifyC) d.notifyC.removeEventListener('characteristicvaluechanged', d.onData);
     if (d.replyC)  d.replyC.removeEventListener('characteristicvaluechanged', d.onReply);
@@ -371,12 +394,12 @@ async function setup(d){
 
     d.notifyC.addEventListener('characteristicvaluechanged', d.onData);
     await d.notifyC.startNotifications();
-    log(`${d.tag} 數據：${notifyC.uuid}${writeC ? '，指令：' + writeC.uuid : '，沒有可寫入的指令 characteristic'}`);
+    log(`${d.tag} 數據：${short(notifyC.uuid)}${writeC ? '，指令：' + short(writeC.uuid) : '，沒有可寫入的指令 characteristic'}`);
     if (d.replyC){
       d.replyC.addEventListener('characteristicvaluechanged', d.onReply);
       await d.replyC.startNotifications();
     }
-    if (battC && battC.properties.read){
+    if (battC && pr(battC).read){
       try { d.batt = (await battC.readValue()).getUint8(0); } catch(e){ log(`${d.tag} 讀電量失敗：${e.message}`); }
     }
     await applyConfig(d, c);
@@ -384,8 +407,8 @@ async function setup(d){
     setStatus(d, '已連線', 'ok');
     if ($('#probe').checked) probeOthers(d, chars).catch(e => log(`${d.tag} 探測失敗：${e.message}`));
   } catch(e){
-    log(`${d.tag} 連線失敗：${e.message}`);
-    setStatus(d, '失敗：' + e.message, 'bad');
+    log(`${d.tag} 連線失敗：${describeErr(e)}`);
+    setStatus(d, '失敗：' + describeErr(e), 'bad');
   }
 }
 
@@ -394,7 +417,7 @@ async function readDeviceInfo(d, find){
   const info = [];
   for (const [u, name] of [[UUID.model, '型號'], [UUID.firmware, '韌體']]){
     const ch = find(u);
-    if (!ch || !ch.properties.read) continue;
+    if (!ch || !pr(ch).read) continue;
     try { info.push(`${name} ${textDec.decode(await ch.readValue()).replace(/\0+$/, '')}`); }
     catch(e){ log(`${d.tag} 讀${name}失敗：${e.message}`); }
   }
@@ -409,22 +432,22 @@ async function readDeviceInfo(d, find){
 async function probeOthers(d, chars){
   const skip = new Set([d.notifyC, d.replyC].filter(Boolean));
   for (const ch of chars){
-    if (skip.has(ch) || !(ch.properties.notify || ch.properties.indicate)) continue;
+    if (skip.has(ch) || !(pr(ch).notify || pr(ch).indicate)) continue;
     let k = 0;
     const h = e => {
       const v = e.target.value;
-      log(`${d.tag} 探測 ${ch.uuid.slice(4, 8)} [${v.byteLength}B] ${hex(v)}`);
+      log(`${d.tag} 探測 ${short(ch.uuid)} [${v.byteLength}B] ${hex(v)}`);
       if (++k >= 3){ ch.removeEventListener('characteristicvaluechanged', h); ch.stopNotifications().catch(() => {}); }
     };
     try {
       ch.addEventListener('characteristicvaluechanged', h);
       await ch.startNotifications();
-      log(`${d.tag} 探測訂閱 ${ch.uuid.slice(4, 8)}`);
-    } catch(e){ log(`${d.tag} 探測 ${ch.uuid.slice(4, 8)} 無法訂閱：${e.message}`); }
+      log(`${d.tag} 探測訂閱 ${short(ch.uuid)}`);
+    } catch(e){ log(`${d.tag} 探測 ${short(ch.uuid)} 無法訂閱：${describeErr(e)}`); }
   }
   for (const ch of chars){
-    if (skip.has(ch) || !ch.properties.read) continue;
-    try { const v = await ch.readValue(); log(`${d.tag} 讀取 ${ch.uuid.slice(4, 8)} [${v.byteLength}B] ${hex(v)}`); }
+    if (skip.has(ch) || !pr(ch).read) continue;
+    try { const v = await ch.readValue(); log(`${d.tag} 讀取 ${short(ch.uuid)} [${v.byteLength}B] ${hex(v)}`); }
     catch(e){}
   }
 }
@@ -469,7 +492,7 @@ async function applyConfig(d, c){
     d.cfgUntil = performance.now() + 3000;
     await writeChar(d.writeC, new Uint8Array([0x49]));
     await sleep(400);
-    if (d.cfgReadC && d.cfgReadC.properties.read){
+    if (d.cfgReadC && pr(d.cfgReadC).read){
       const v = await d.cfgReadC.readValue();
       log(`${d.tag} 讀設定 ${hex(v)}`);
       parseConfig(d, v);
