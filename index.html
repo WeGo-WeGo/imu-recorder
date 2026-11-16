@@ -167,7 +167,9 @@ const UUID = {
 const ACC_INV = {0:2, 1:4, 2:8, 3:16};
 const GYR_INV = {0:250, 1:500, 2:1000, 3:2000};
 // Rabboni 與 Bboni AI 共用 1600(數據) / fff0(指令)；其餘是 Bboni AI 額外的服務，連上後會記錄在除錯紀錄
-const OPT_SERVICES = [UUID.newSvc, 0xfff0, 0x1600, 0x1700, 'battery_service', 'device_information', 0xff00, 0xffc0, 0x1900, 0x181a];
+// 一律用完整 128 位元 UUID 字串：Bluefy 等瀏覽器不一定看得懂 0x1600、'battery_service' 這類簡寫
+const full16 = n => `0000${n.toString(16).padStart(4, '0')}-0000-1000-8000-00805f9b34fb`;
+const OPT_SERVICES = [UUID.newSvc].concat([0xfff0, 0x1600, 0x1700, 0x180f, 0x180a, 0xff00, 0xffc0, 0x1900, 0x181a].map(full16));
 const ACC_CODE = {2:0, 4:1, 8:2, 16:3};
 const GYR_CODE = {250:0, 500:1, 1000:2, 2000:3};
 const RATE_CODE = {10:0, 20:1, 50:2, 100:3, 200:4, 500:5, 1000:6};
@@ -273,22 +275,55 @@ function setStatus(d, text, cls){
   d.q('.rc').hidden = !(cls === 'bad');
 }
 
+// 有些瀏覽器拒絕時丟出的不是標準 Error（沒有 name/message），把它能看到的內容都列出來
+function describeErr(e){
+  if (e === undefined) return '(undefined)';
+  if (e === null) return '(null)';
+  if (typeof e !== 'object') return `${typeof e}：${String(e)}`;
+  const parts = [];
+  if (e.name) parts.push(e.name);
+  if (e.message) parts.push(e.message);
+  if (e.code !== undefined) parts.push('code=' + e.code);
+  if (!parts.length){
+    let j = '';
+    try { j = JSON.stringify(e); } catch(_){}
+    parts.push((e.constructor && e.constructor.name || 'object') + ' ' + (j && j !== '{}' ? j : String(e)));
+  }
+  return parts.join('：');
+}
+
 async function addSensor(){
   if (!navigator.bluetooth || !window.isSecureContext){
     showBanner();
     alert($('#banner').textContent);
     return;
   }
-  const opts = $('#all').checked
-    ? {acceptAllDevices:true, optionalServices:OPT_SERVICES}
-    : {filters:[{namePrefix:'RABBONI'},{namePrefix:'Rabboni'},{namePrefix:'rabboni'},{namePrefix:'Bboni'},{namePrefix:'BBONI'},
-                {services:[UUID.newSvc]},{services:[0x1600]},{services:[0xfff0]}], optionalServices:OPT_SERVICES};
-  let dev;
-  try { dev = await navigator.bluetooth.requestDevice(opts); }
-  catch(e){
-    log(`未選擇裝置：${e.name} ${e.message}`);
-    if (/cancel/i.test(e.message)) return;          // 使用者自己按了取消
-    let why = `無法開啟藍牙裝置清單（${e.name}：${e.message}）`;
+  const allOpts = {acceptAllDevices:true, optionalServices:OPT_SERVICES};
+  const filtOpts = {filters:[{namePrefix:'RABBONI'},{namePrefix:'Rabboni'},{namePrefix:'rabboni'},{namePrefix:'Bboni'},{namePrefix:'BBONI'},
+                {services:[UUID.newSvc]},{services:[full16(0x1600)]},{services:[full16(0xfff0)]}], optionalServices:OPT_SERVICES};
+  const nameOpts = {filters:[{namePrefix:'RABBONI'},{namePrefix:'Bboni'}], optionalServices:OPT_SERVICES};
+  const bareOpts = {acceptAllDevices:true};
+  // 依序嘗試；只有「立刻被拒絕」（清單根本沒出現）才換下一種。清單出現過但使用者取消或沒選，就停止
+  const tries = $('#all').checked
+    ? [['全部裝置', allOpts], ['全部裝置(不帶服務)', bareOpts]]
+    : [['篩選', filtOpts], ['只用名稱', nameOpts], ['全部裝置', allOpts], ['全部裝置(不帶服務)', bareOpts]];
+  let dev = null, err = null;
+  const report = [];
+  for (const [what, opts] of tries){
+    const t = performance.now();
+    try { dev = await navigator.bluetooth.requestDevice(opts); err = null; log(`裝置清單成功（${what}）`); break; }
+    catch(e){
+      err = e;
+      const ms = Math.round(performance.now() - t);
+      report.push(`${what}：${describeErr(e)}（${ms} ms）`);
+      log(`開啟裝置清單失敗（${what}，${ms} ms）：${describeErr(e)}`);
+      if (/cancel/i.test(describeErr(e))) return;   // 使用者自己按了取消
+      if (ms > 1500) break;                         // 清單有出現過，不再重複跳出
+    }
+  }
+  if (!dev){
+    const e = err || new Error('unknown');
+    let why = `無法開啟藍牙裝置清單\n${report.join('\n')}\n\n瀏覽器：${navigator.userAgent}`;
     try {
       if (navigator.bluetooth.getAvailability && !(await navigator.bluetooth.getAvailability()))
         why += '\n\n手機的藍牙沒有開啟，或沒有允許這個 App 使用藍牙：請到「設定 → 隱私權與安全性 → 藍牙」開啟。';
