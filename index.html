@@ -1,0 +1,829 @@
+<!doctype html>
+<html lang="zh-Hant">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<title>多顆 IMU 記錄器</title>
+<style>
+:root{
+  --bg:#f6f7f9; --card:#fff; --fg:#1b1f24; --mut:#5f6b78; --line:#d9dee4;
+  --acc:#1f6feb; --ok:#1a7f37; --warn:#b35900; --bad:#cf222e;
+  --gyro:#1f6feb; --accel:#bf3989;
+  --cx:#d1242f; --cy:#1a7f37; --cz:#1f6feb;
+}
+@media (prefers-color-scheme: dark){
+  :root:not([data-theme="light"]){
+    --bg:#0f1216; --card:#181c22; --fg:#e6e9ed; --mut:#98a3af; --line:#2c333c;
+    --acc:#4c8dff; --ok:#3fb950; --warn:#e3a33b; --bad:#ff6b6b;
+    --gyro:#58a6ff; --accel:#f778ba;
+    --cx:#ff7b72; --cy:#3fb950; --cz:#58a6ff;
+  }
+}
+:root[data-theme="dark"]{
+  --bg:#0f1216; --card:#181c22; --fg:#e6e9ed; --mut:#98a3af; --line:#2c333c;
+  --acc:#4c8dff; --ok:#3fb950; --warn:#e3a33b; --bad:#ff6b6b;
+  --gyro:#58a6ff; --accel:#f778ba;
+  --cx:#ff7b72; --cy:#3fb950; --cz:#58a6ff;
+}
+*{box-sizing:border-box}
+[hidden]{display:none !important}
+body{margin:0;background:var(--bg);color:var(--fg);font:15px/1.45 -apple-system,BlinkMacSystemFont,"PingFang TC","Noto Sans TC",sans-serif;
+  padding:12px 16px calc(24px + env(safe-area-inset-bottom))}
+h1{font-size:20px;margin:4px 0 10px}
+.panel{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:12px;margin:10px 0}
+.row{display:flex;flex-wrap:wrap;gap:8px;align-items:center}
+label.f{display:flex;flex-direction:column;font-size:12px;color:var(--mut);gap:2px;flex:1 1 90px}
+select,button,input[type=text]{font:inherit;color:var(--fg);background:var(--bg);border:1px solid var(--line);border-radius:8px;padding:8px 10px}
+button{cursor:pointer;min-height:42px}
+button.primary{background:var(--acc);border-color:var(--acc);color:#fff;font-weight:600}
+button.rec{background:var(--bad);border-color:var(--bad);color:#fff;font-weight:700;flex:1 1 140px;font-size:17px}
+button.recing{animation:pulse 1s infinite}
+@keyframes pulse{50%{opacity:.6}}
+button:disabled{opacity:.45}
+.small{font-size:12px;color:var(--mut)}
+.warn{color:var(--warn)} .bad{color:var(--bad)} .ok{color:var(--ok)}
+.dev{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:10px;margin:10px 0}
+.dev .top{display:flex;gap:8px;align-items:center;flex-wrap:wrap}
+.dev .tag{font-weight:700}
+.dev{transition:box-shadow .15s,border-color .15s}
+.dev.moving{border-color:var(--acc);box-shadow:0 0 0 3px var(--acc)}
+.dev .shake{color:var(--acc);font-weight:700;font-size:13px}
+.dev select.lbl{font-weight:700}
+.dev select.lbl.unset{color:var(--warn);border-color:var(--warn)}
+.dev .st{font-size:13px}
+.dev .grid{display:grid;grid-template-columns:repeat(3,1fr);gap:4px 10px;font-size:13px;margin-top:6px;font-variant-numeric:tabular-nums}
+.dev .grid b{font-weight:600}
+.dev .grid.xyz{border-top:1px solid var(--line);padding-top:4px}
+.cx{color:var(--cx)} .cy{color:var(--cy)} .cz{color:var(--cz)}
+.dev canvas{width:100%;height:90px;display:block;margin-top:6px;border-radius:6px;background:var(--bg)}
+.dev .hex{font:11px ui-monospace,Menlo,monospace;color:var(--mut);word-break:break-all;margin-top:4px}
+.legend span{display:inline-block;margin-right:10px}
+.sw{display:inline-block;width:10px;height:3px;vertical-align:middle;margin-right:4px}
+pre#log{font:11px ui-monospace,Menlo,monospace;white-space:pre-wrap;max-height:260px;overflow:auto;margin:6px 0 0}
+textarea{width:100%;height:160px;font:11px ui-monospace,Menlo,monospace;background:var(--bg);color:var(--fg);border:1px solid var(--line);border-radius:8px}
+#banner{display:none}
+</style>
+</head>
+<body>
+<h1>多顆 IMU 記錄器</h1>
+<div id="banner" class="panel bad"></div>
+
+<div class="panel">
+  <div class="row">
+    <label class="f">加速度量程
+      <select id="acc"><option>2</option><option>4</option><option>8</option><option selected>16</option></select></label>
+    <label class="f">陀螺儀量程 (°/s)
+      <select id="gyr"><option>250</option><option>500</option><option>1000</option><option selected>2000</option></select></label>
+    <label class="f">取樣率 (Hz)
+      <select id="rate"><option>10</option><option>20</option><option>50</option><option selected>100</option><option>200</option><option>500</option></select></label>
+    <label class="f">圖表
+      <select id="view"><option value="xyz" selected>三軸 x/y/z</option><option value="mag">合成大小</option></select></label>
+  </div>
+  <div class="row" style="margin-top:8px">
+    <label class="small"><input type="checkbox" id="writeCfg" checked> 連線後把上面的設定寫入感測器</label>
+    <label class="small"><input type="checkbox" id="all"> 列出所有藍牙裝置（找不到感測器時勾選）</label>
+    <label class="small"><input type="checkbox" id="probe"> 探測模式（連線後把其他通道的原始數據記到除錯紀錄，解析新型感測器用）</label>
+  </div>
+  <div class="row" style="margin-top:8px">
+    <button class="primary" id="add">＋ 新增感測器</button>
+    <button id="demo">示範模式</button>
+  </div>
+  <div class="small" style="margin-top:6px">每顆感測器的名稱都是 RABBONI，配對方式：<b>一次只開一顆的電源</b>再按「新增感測器」（已連上的不會出現在清單裡）。連上後<b>晃動手上那顆</b>，亮起來的卡片就是它，再選它的位置。網頁會記住每顆的位置，下次連線自動帶入。改設定後按該感測器的「套用設定」。</div>
+</div>
+
+<div id="devs"></div>
+
+<div class="panel">
+  <div class="row">
+    <button class="rec" id="rec">● 開始記錄</button>
+    <button id="mark">標記</button>
+  </div>
+  <div id="recInfo" class="small" style="margin-top:6px">尚未記錄</div>
+  <div class="row" style="margin-top:8px">
+    <label class="f">受試者代號
+      <input type="text" id="subj" placeholder="P01" maxlength="16" autocomplete="off" autocapitalize="characters"></label>
+    <label class="f">桿數
+      <select id="swing"></select></label>
+    <label class="f" id="condWrap" hidden>自訂條件
+      <input type="text" id="cond" placeholder="driver" maxlength="24" autocomplete="off" autocapitalize="off"></label>
+  </div>
+  <div class="small" style="margin-top:4px">檔名：<b id="fnPreview"></b><span id="fnWarn" class="warn"></span></div>
+  <div class="row" style="margin-top:4px">
+    <label class="small"><input type="checkbox" id="autoClear" checked> 匯出後清除資料，桿數自動跳到下一組（例如 1-10 → 11-20）</label>
+    <button id="undo" class="small" hidden>復原剛才清除的資料</button>
+  </div>
+  <div class="row" style="margin-top:8px">
+    <button id="dl">下載 CSV</button>
+    <button id="share">分享 CSV</button>
+    <button id="show">顯示文字</button>
+    <button id="clear">清除資料</button>
+  </div>
+  <textarea id="csvOut" hidden readonly></textarea>
+</div>
+
+<details class="panel"><summary>除錯紀錄</summary><pre id="log"></pre></details>
+
+<script>
+'use strict';
+const $ = s => document.querySelector(s);
+
+// Rabboni BLE 協定（新版韌體 A9E9xxxx，舊版 16-bit UUID）
+const UUID = {
+  newSvc:    'a9e90000-194c-4523-a473-5fdf36aa4d20',
+  newA:      'a9e90001-194c-4523-a473-5fdf36aa4d20',
+  newB:      'a9e90002-194c-4523-a473-5fdf36aa4d20',
+  oldData:   '00001601-0000-1000-8000-00805f9b34fb',
+  oldWrite:  '0000fff6-0000-1000-8000-00805f9b34fb',
+  oldReply:  '0000fff7-0000-1000-8000-00805f9b34fb',
+  bbReply:   '0000fff8-0000-1000-8000-00805f9b34fb',   // Bboni AI 沒有 fff7，推測回覆改走 fff8
+  model:     '00002a24-0000-1000-8000-00805f9b34fb',
+  firmware:  '00002a26-0000-1000-8000-00805f9b34fb',
+  battery:   '00002a19-0000-1000-8000-00805f9b34fb',
+  cfgRead:   '00001705-0000-1000-8000-00805f9b34fb',
+};
+const ACC_INV = {0:2, 1:4, 2:8, 3:16};
+const GYR_INV = {0:250, 1:500, 2:1000, 3:2000};
+// Rabboni 與 Bboni AI 共用 1600(數據) / fff0(指令)；其餘是 Bboni AI 額外的服務，連上後會記錄在除錯紀錄
+const OPT_SERVICES = [UUID.newSvc, 0xfff0, 0x1600, 0x1700, 'battery_service', 'device_information', 0xff00, 0xffc0, 0x1900, 0x181a];
+const ACC_CODE = {2:0, 4:1, 8:2, 16:3};
+const GYR_CODE = {250:0, 500:1, 1000:2, 2000:3};
+const RATE_CODE = {10:0, 20:1, 50:2, 100:3, 200:4, 500:5, 1000:6};
+const LABELS = ['未指定','頭部','上背','下背','骨盆','前導手手腕','後手手腕','前導手前臂','後手前臂','手套','桿身','其他'];
+const RING = 600;
+
+const devices = [];
+let seq = 0;
+let recording = false, t0 = 0, take = 0, rows = [], marks = 0, wakeLock = null;
+let recStartDate = null, backup = null;
+
+function log(msg){
+  const el = $('#log');
+  el.textContent = `[${new Date().toLocaleTimeString()}] ${msg}\n` + el.textContent.slice(0, 30000);
+}
+function cfg(){ return {acc:+$('#acc').value, gyr:+$('#gyr').value, rate:+$('#rate').value, write:$('#writeCfg').checked}; }
+function hex(dv){ let s=''; for (let i=0;i<dv.byteLength;i++) s += dv.getUint8(i).toString(16).padStart(2,'0'); return s; }
+function props(c){ return ['read','write','writeWithoutResponse','notify','indicate'].filter(k => c.properties[k]).join('/'); }
+
+// 15 bytes，與 PS Spine 使用的範本相同：45 aa gg 01 12 01 01 00 00 rr 00 00 00 09 C4
+function buildConfig(c){
+  return new Uint8Array([0x45, ACC_CODE[c.acc], GYR_CODE[c.gyr], 0x01,0x12,0x01,0x01,0x00,0x00, RATE_CODE[c.rate], 0x00,0x00,0x00,0x09,0xC4]);
+}
+async function writeChar(ch, buf){
+  if (ch.properties.write && ch.writeValueWithResponse) return ch.writeValueWithResponse(buf);
+  if (!ch.properties.write && ch.properties.writeWithoutResponse && ch.writeValueWithoutResponse) return ch.writeValueWithoutResponse(buf);
+  return ch.writeValue(buf);
+}
+
+function loadLabel(id){
+  try { const v = localStorage.getItem('lbl:' + id); return LABELS.includes(v) ? v : LABELS[0]; }
+  catch(e){ return LABELS[0]; }
+}
+function saveLabel(id, v){ try { localStorage.setItem('lbl:'+id, v); } catch(e){} }
+
+function makeDevice(dev, name){
+  const d = {
+    num: ++seq, tag: 'S' + seq, name: name || (dev && dev.name) || '未命名', dev,
+    id: dev ? dev.id : 'demo' + seq, accR:16, gyrR:2000, rate:100,
+    n:0, secN:0, hz:0, len:0, idx:0, clipA:0, clipG:0, bad:0, peakA:0, peakW:0,
+    batt:null, lastHex:'', last:null, cfgUntil:0, cfgMsg:'', devCfg:'', manual:false, retries:0, moveT:-1e9,
+    cfgAt:0, rateTry:0, rateWarn:'',
+    ang:[0, 0, 0],
+    // ring[0..2] = ax/ay/az，ring[3..5] = gx/gy/gz，ring[6] = |a|，ring[7] = |ω|
+    ring: Array.from({length:8}, () => new Float32Array(RING)), rp:0,
+  };
+  d.label = loadLabel(d.id);
+  d.onData = e => onPacket(d, e.target.value);
+  d.onReply = e => onReply(d, e.target.value);
+  devices.push(d);
+  renderCard(d);
+  return d;
+}
+
+function renderCard(d){
+  const el = document.createElement('div');
+  el.className = 'dev';
+  el.innerHTML = `
+    <div class="top">
+      <span class="tag">${d.tag}</span><span class="small nm"></span>
+      <select class="lbl">${LABELS.map(l=>`<option${l===d.label?' selected':''}>${l}</option>`).join('')}</select>
+      <span class="st small"></span>
+      <span class="shake" hidden>← 晃動中</span>
+      <span style="flex:1"></span>
+      <button class="rc small" hidden>重新連線</button>
+      <button class="ap small">套用設定</button>
+      <button class="rm small">移除</button>
+    </div>
+    <div class="grid">
+      <div>取樣 <b class="hz">–</b> Hz</div><div>電量 <b class="bt">–</b></div><div>封包 <b class="ln">–</b> B</div>
+      <div>|a| <b class="am">–</b> g</div><div>|ω| <b class="wm">–</b> °/s</div><div>計數 <b class="ct">–</b></div>
+      <div>峰值|a| <b class="pa">–</b></div><div>峰值|ω| <b class="pw">–</b></div><div>飽和 <b class="cl">0</b></div>
+    </div>
+    <div class="grid xyz">
+      <div><span class="cx">ax</span> <b class="v0">–</b> g</div><div><span class="cy">ay</span> <b class="v1">–</b> g</div><div><span class="cz">az</span> <b class="v2">–</b> g</div>
+      <div><span class="cx">ωx</span> <b class="v3">–</b> °/s</div><div><span class="cy">ωy</span> <b class="v4">–</b> °/s</div><div><span class="cz">ωz</span> <b class="v5">–</b> °/s</div>
+      <div><span class="cx">∫x</span> <b class="i0">0</b>°</div><div><span class="cy">∫y</span> <b class="i1">0</b>°</div><div><span class="cz">∫z</span> <b class="i2">0</b>° <button class="az small" style="min-height:0;padding:2px 6px">歸零</button></div>
+    </div>
+    <canvas class="c1"></canvas>
+    <canvas class="c2"></canvas>
+    <div class="small legend">
+      <span class="lx"><span><i class="sw" style="background:var(--cx)"></i>x</span><span><i class="sw" style="background:var(--cy)"></i>y</span><span><i class="sw" style="background:var(--cz)"></i>z</span></span>
+      <span class="lm" hidden><span><i class="sw" style="background:var(--gyro)"></i>|ω| 角速度</span><span><i class="sw" style="background:var(--accel)"></i>|a| 加速度</span></span>
+      <span class="cf"></span></div>
+    <div class="hex"></div>`;
+  d.el = el;
+  d.q = s => el.querySelector(s);
+  d.q('.nm').textContent = d.name;
+  const lbl = d.q('.lbl');
+  lbl.classList.toggle('unset', d.label === LABELS[0]);
+  lbl.onchange = e => { d.label = e.target.value; saveLabel(d.id, d.label); lbl.classList.toggle('unset', d.label === LABELS[0]); };
+  d.q('.rm').onclick = () => removeDevice(d);
+  d.q('.az').onclick = () => { d.ang = [0, 0, 0]; };
+  d.q('.rc').onclick = () => { d.retries = 0; setup(d); };
+  d.q('.ap').onclick = () => { d.rateTry = 0; d.rateWarn = ''; if (d.demo){ const c = cfg(); d.accR = c.acc; d.gyrR = c.gyr; d.rate = c.rate; d.clipA = d.clipG = 0; } else applyConfig(d).catch(e => log(`${d.tag} 套用設定失敗：${e.message}`)); };
+  $('#devs').appendChild(el);
+}
+
+function setStatus(d, text, cls){
+  const st = d.q('.st');
+  st.textContent = text;
+  st.className = 'st small ' + (cls || '');
+  d.q('.rc').hidden = !(cls === 'bad');
+}
+
+async function addSensor(){
+  if (!navigator.bluetooth){ showBanner(); return; }
+  const opts = $('#all').checked
+    ? {acceptAllDevices:true, optionalServices:OPT_SERVICES}
+    : {filters:[{namePrefix:'RABBONI'},{namePrefix:'Rabboni'},{namePrefix:'rabboni'},{namePrefix:'Bboni'},{namePrefix:'BBONI'},
+                {services:[UUID.newSvc]},{services:[0x1600]},{services:[0xfff0]}], optionalServices:OPT_SERVICES};
+  let dev;
+  try { dev = await navigator.bluetooth.requestDevice(opts); }
+  catch(e){ log('未選擇裝置：' + e.message); return; }
+  if (devices.some(x => x.dev === dev || (x.dev && x.dev.id === dev.id))){ alert('這顆已經在清單裡了'); return; }
+  const d = makeDevice(dev);
+  dev.addEventListener('gattserverdisconnected', () => onDisconnect(d));
+  await setup(d);
+}
+
+async function setup(d){
+  const c = cfg();
+  d.accR = c.acc; d.gyrR = c.gyr; d.rate = c.rate;
+  d.rateTry = 0; d.rateWarn = ''; d.cfgAt = 0;
+  setStatus(d, '連線中…', 'warn');
+  try {
+    const server = await d.dev.gatt.connect();
+    const svcs = await server.getPrimaryServices();
+    const chars = [];
+    for (const s of svcs){
+      try {
+        for (const ch of await s.getCharacteristics()){
+          chars.push(ch);
+          log(`${d.tag} ${s.uuid} → ${ch.uuid} [${props(ch)}]`);
+        }
+      } catch(e){ log(`${d.tag} 讀 ${s.uuid} 失敗：${e.message}`); }
+    }
+    const find = u => chars.find(c => c.uuid === u);
+    const pick = (list, ...ps) => { for (const u of list){ const c = find(u); if (c && ps.some(p => c.properties[p])) return c; } return null; };
+    const notifyC = pick([UUID.newB, UUID.newA, UUID.oldData], 'notify', 'indicate');
+    const writeC  = pick([UUID.newA, UUID.newB, UUID.oldWrite], 'write', 'writeWithoutResponse');
+    const replyC  = pick([UUID.oldReply, UUID.bbReply], 'notify', 'indicate');
+    const battC   = find(UUID.battery);
+    d.cfgReadC    = find(UUID.cfgRead);
+    await readDeviceInfo(d, find);
+    if (!notifyC) throw new Error('找不到數據 characteristic（展開「除錯紀錄」看裝置有哪些 UUID）');
+
+    if (d.notifyC) d.notifyC.removeEventListener('characteristicvaluechanged', d.onData);
+    if (d.replyC)  d.replyC.removeEventListener('characteristicvaluechanged', d.onReply);
+    d.notifyC = notifyC; d.writeC = writeC; d.replyC = (replyC && replyC !== notifyC) ? replyC : null;
+
+    d.notifyC.addEventListener('characteristicvaluechanged', d.onData);
+    await d.notifyC.startNotifications();
+    log(`${d.tag} 數據：${notifyC.uuid}${writeC ? '，指令：' + writeC.uuid : '，沒有可寫入的指令 characteristic'}`);
+    if (d.replyC){
+      d.replyC.addEventListener('characteristicvaluechanged', d.onReply);
+      await d.replyC.startNotifications();
+    }
+    if (battC && battC.properties.read){
+      try { d.batt = (await battC.readValue()).getUint8(0); } catch(e){ log(`${d.tag} 讀電量失敗：${e.message}`); }
+    }
+    await applyConfig(d, c);
+    d.retries = 0;
+    setStatus(d, '已連線', 'ok');
+    if ($('#probe').checked) probeOthers(d, chars).catch(e => log(`${d.tag} 探測失敗：${e.message}`));
+  } catch(e){
+    log(`${d.tag} 連線失敗：${e.message}`);
+    setStatus(d, '失敗：' + e.message, 'bad');
+  }
+}
+
+const textDec = new TextDecoder();
+async function readDeviceInfo(d, find){
+  const info = [];
+  for (const [u, name] of [[UUID.model, '型號'], [UUID.firmware, '韌體']]){
+    const ch = find(u);
+    if (!ch || !ch.properties.read) continue;
+    try { info.push(`${name} ${textDec.decode(await ch.readValue()).replace(/\0+$/, '')}`); }
+    catch(e){ log(`${d.tag} 讀${name}失敗：${e.message}`); }
+  }
+  if (info.length){
+    d.info = info.join(' / ');
+    d.q('.nm').textContent = `${d.name}（${d.info}）`;
+    log(`${d.tag} ${d.info}`);
+  }
+}
+
+// 解析新感測器用：訂閱其他可通知的 characteristic，各記下前 3 筆原始數據後停止
+async function probeOthers(d, chars){
+  const skip = new Set([d.notifyC, d.replyC].filter(Boolean));
+  for (const ch of chars){
+    if (skip.has(ch) || !(ch.properties.notify || ch.properties.indicate)) continue;
+    let k = 0;
+    const h = e => {
+      const v = e.target.value;
+      log(`${d.tag} 探測 ${ch.uuid.slice(4, 8)} [${v.byteLength}B] ${hex(v)}`);
+      if (++k >= 3){ ch.removeEventListener('characteristicvaluechanged', h); ch.stopNotifications().catch(() => {}); }
+    };
+    try {
+      ch.addEventListener('characteristicvaluechanged', h);
+      await ch.startNotifications();
+      log(`${d.tag} 探測訂閱 ${ch.uuid.slice(4, 8)}`);
+    } catch(e){ log(`${d.tag} 探測 ${ch.uuid.slice(4, 8)} 無法訂閱：${e.message}`); }
+  }
+  for (const ch of chars){
+    if (skip.has(ch) || !ch.properties.read) continue;
+    try { const v = await ch.readValue(); log(`${d.tag} 讀取 ${ch.uuid.slice(4, 8)} [${v.byteLength}B] ${hex(v)}`); }
+    catch(e){}
+  }
+}
+
+function onDisconnect(d){
+  if (d.manual) return;
+  setStatus(d, '已斷線', 'bad');
+  log(`${d.tag} 斷線`);
+  if (d.retries < 3){
+    d.retries++;
+    setTimeout(() => { if (!d.manual) setup(d); }, 800);
+  }
+}
+
+function removeDevice(d){
+  d.manual = true;
+  if (d.timer) clearInterval(d.timer);
+  try { if (d.dev && d.dev.gatt.connected) d.dev.gatt.disconnect(); } catch(e){}
+  d.el.remove();
+  devices.splice(devices.indexOf(d), 1);
+}
+
+const sleep = ms => new Promise(r => setTimeout(r, ms));
+
+// 寫入量程與取樣率，接著讀回感測器實際使用的量程（換算以感測器回報為準）
+async function applyConfig(d, c){
+  c = c || cfg();
+  d.accR = c.acc; d.gyrR = c.gyr; d.rate = c.rate;
+  d.clipA = 0; d.clipG = 0; d.devCfg = '';
+  if (!d.writeC){ d.cfgMsg = '無法寫入設定：請確認上面的量程與感測器一致'; return; }
+  if (c.write){
+    const buf = buildConfig(c);
+    d.cfgUntil = performance.now() + 3000;
+    d.cfgMsg = '設定已送出，等待回覆';
+    await writeChar(d.writeC, buf);
+    log(`${d.tag} 寫入設定 ${hex(new DataView(buf.buffer))}`);
+    await sleep(400);
+  } else {
+    d.cfgMsg = '未寫入設定';
+  }
+  try {
+    d.cfgUntil = performance.now() + 3000;
+    await writeChar(d.writeC, new Uint8Array([0x49]));
+    await sleep(400);
+    if (d.cfgReadC && d.cfgReadC.properties.read){
+      const v = await d.cfgReadC.readValue();
+      log(`${d.tag} 讀設定 ${hex(v)}`);
+      parseConfig(d, v);
+    }
+  } catch(e){ log(`${d.tag} 讀回設定失敗：${e.message}`); }
+  if (!d.devCfg) d.devCfg = '感測器沒有回報量程，換算用上面選的值';
+  d.cfgAt = performance.now();
+}
+
+// 實際取樣率遠低於設定值（例如停在預設的 10 Hz）時，自動重寫一次設定
+function checkRate(d){
+  if (d.demo || !d.writeC || !d.dev || !d.dev.gatt.connected || !d.cfgAt || !d.n) return;
+  if (performance.now() - d.cfgAt < 3000) return;
+  if (d.hz >= d.rate * 0.6){ d.rateWarn = ''; return; }
+  if (d.rateTry < 1){
+    d.rateTry++;
+    d.cfgAt = 0;
+    log(`${d.tag} 只收到 ${d.hz} Hz（設定 ${d.rate} Hz），自動重新寫入設定`);
+    applyConfig(d).catch(e => log(`${d.tag} 重寫設定失敗：${e.message}`));
+  } else {
+    d.rateWarn = `只收到 ${d.hz} Hz，設定可能沒有生效：按「套用設定」或移除後重新連線`;
+  }
+}
+
+function parseConfig(d, dv){
+  if (dv.byteLength < 3) return;
+  const b0 = dv.getUint8(0);
+  if (b0 !== 0x45 && b0 !== 0x49) return;
+  const a = ACC_INV[dv.getUint8(1)], g = GYR_INV[dv.getUint8(2)];
+  if (!a || !g) return;
+  if (a !== d.accR || g !== d.gyrR) log(`${d.tag} 感測器量程是 ±${a}g / ±${g}°/s，與選擇的不同，換算改用感測器的值`);
+  d.accR = a; d.gyrR = g;
+  d.devCfg = `感測器回報 ±${a}g / ±${g}°/s`;
+}
+
+function onReply(d, dv){
+  const b0 = dv.byteLength ? dv.getUint8(0) : -1;
+  if (b0 === 0x45) d.cfgMsg = '設定成功';
+  else if (b0 === 0xC5) d.cfgMsg = '設定失敗（感測器拒絕）';
+  else if (b0 !== 0x49) d.cfgMsg = '設定回覆 ' + hex(dv);
+  log(`${d.tag} 回覆 ${hex(dv)}`);
+  parseConfig(d, dv);
+}
+
+function onPacket(d, dv){
+  const now = performance.now();
+  const len = dv.byteLength;
+  if (len && now < d.cfgUntil && len !== 16){
+    const b0 = dv.getUint8(0);
+    if (b0 === 0x45 || b0 === 0xC5 || b0 === 0x49){ onReply(d, dv); return; }
+  }
+  if (len < 12){ d.bad++; d.lastHex = hex(dv); return; }
+  const r = [0,2,4,6,8,10].map(i => dv.getInt16(i, false));
+  const ka = d.accR / 32768, kg = d.gyrR / 32768;
+  const ax = r[0]*ka, ay = r[1]*ka, az = r[2]*ka, gx = r[3]*kg, gy = r[4]*kg, gz = r[5]*kg;
+  const sat = v => v >= 32767 || v <= -32768;
+  const sA = sat(r[0]) || sat(r[1]) || sat(r[2]), sG = sat(r[3]) || sat(r[4]) || sat(r[5]);
+  if (sA) d.clipA++;
+  if (sG) d.clipG++;
+  d.ang[0] += gx / d.rate; d.ang[1] += gy / d.rate; d.ang[2] += gz / d.rate;
+  if (Math.hypot(gx, gy, gz) > 150) d.moveT = now;   // 用來在畫面上標出正在晃動的感測器
+  const cnt = len >= 14 ? dv.getUint16(12, false) : '';
+  const am = Math.hypot(ax, ay, az), wm = Math.hypot(gx, gy, gz);
+  d.n++; d.secN++; d.len = len; d.last = {am, wm, cnt, v:[ax, ay, az, gx, gy, gz]}; d.lastHex = hex(dv);
+  [ax, ay, az, gx, gy, gz, am, wm].forEach((v, k) => { d.ring[k][d.rp] = v; });
+  d.rp = (d.rp + 1) % RING;
+  if (recording){
+    d.idx++;
+    if (am > d.peakA) d.peakA = am;
+    if (wm > d.peakW) d.peakW = wm;
+    rows.push([take, d.tag, d.label, now - t0, d.idx, cnt, ax, ay, az, gx, gy, gz, (sA ? 'a' : '') + (sG ? 'g' : ''), d.lastHex]);
+  }
+}
+
+// ---------- 示範模式（不需要感測器，用來先熟悉畫面與 CSV） ----------
+function addDemo(){
+  const d = makeDevice(null, '示範感測器');
+  d.demo = true;
+  const c = cfg();
+  d.accR = c.acc; d.gyrR = c.gyr; d.rate = c.rate; d.batt = 90;
+  d.cfgMsg = '示範資料：每 4 秒一次揮桿';
+  setStatus(d, '示範', 'ok');
+  let s = 0, carry = 0;
+  const q = (v, R) => Math.max(-32768, Math.min(32767, Math.round(v / R * 32768)));
+  d.timer = setInterval(() => {
+    carry += d.rate * 0.02;
+    while (carry >= 1){
+      carry--; s++;
+      const t = s / d.rate, ph = t % 4;
+      const swing = Math.exp(-((ph - 2.5) ** 2) / 0.015) * (1200 + 500 * d.num);
+      const back = -Math.exp(-((ph - 1.8) ** 2) / 0.08) * 300;
+      const n = () => (Math.random() - .5) * 8;
+      const gz = swing + back + n(), gx = swing * 0.3 + n(), gy = back * 0.5 + n();
+      const ax = swing / 300 + (Math.random() - .5) * .05, ay = 0.02, az = 1 + swing / 600;
+      const buf = new ArrayBuffer(16), v = new DataView(buf);
+      [ax, ay, az].forEach((x, i) => v.setInt16(i * 2, q(x, d.accR), false));
+      [gx, gy, gz].forEach((x, i) => v.setInt16(6 + i * 2, q(x, d.gyrR), false));
+      v.setUint16(12, Math.floor((t + 1.5) / 4), false);
+      v.setUint16(14, 0, false);
+      onPacket(d, v);
+    }
+  }, 20);
+}
+
+// ---------- 畫面更新 ----------
+function fmt(v, k){ return v == null || v === '' ? '–' : (+v).toFixed(k).replace(/^-(0(\.0+)?)$/, '$1'); }
+setInterval(() => {
+  for (const d of devices){
+    d.hz = d.secN; d.secN = 0;
+    const hz = d.q('.hz');
+    hz.textContent = d.hz;
+    hz.className = 'hz ' + (d.n && d.hz < d.rate * 0.9 ? 'warn' : '');
+    checkRate(d);
+    d.q('.bt').textContent = d.batt == null ? '–' : d.batt + '%';
+    d.q('.ln').textContent = d.len || '–';
+    if (d.last){
+      d.q('.am').textContent = fmt(d.last.am, 2);
+      d.q('.wm').textContent = fmt(d.last.wm, 0);
+      d.q('.ct').textContent = d.last.cnt === '' ? '–' : d.last.cnt;
+      d.last.v.forEach((v, k) => { d.q('.v' + k).textContent = fmt(v, k < 3 ? 2 : 0); });
+    }
+    d.ang.forEach((v, k) => { d.q('.i' + k).textContent = fmt(v, 0); });
+    const mag = $('#view').value === 'mag';
+    d.q('.lx').hidden = mag; d.q('.lm').hidden = !mag; d.q('.c2').hidden = mag;
+    d.q('.pa').textContent = d.peakA ? d.peakA.toFixed(1) + 'g' : '–';
+    d.q('.pw').textContent = d.peakW ? d.peakW.toFixed(0) : '–';
+    const cl = d.q('.cl');
+    cl.textContent = d.clipA + d.clipG ? `a${d.clipA}/ω${d.clipG}` : '0';
+    cl.className = 'cl ' + (d.clipA + d.clipG ? 'bad' : '');
+    d.q('.cf').textContent = [d.rateWarn, d.cfgMsg, d.devCfg, `換算 ±${d.accR}g / ±${d.gyrR}°/s / ${d.rate}Hz`].filter(Boolean).join(' · ');
+    d.q('.hex').textContent = d.lastHex ? 'raw ' + d.lastHex : '';
+  }
+  updateRecInfo();
+}, 1000);
+
+let colors = null;
+function readColors(){
+  const cs = getComputedStyle(document.documentElement);
+  const v = n => cs.getPropertyValue(n).trim();
+  colors = {g:v('--gyro'), a:v('--accel'), l:v('--line'), m:v('--mut'), b:v('--bad'), xyz:[v('--cx'), v('--cy'), v('--cz')]};
+}
+function prepCanvas(cv){
+  const w = cv.clientWidth, h = cv.clientHeight, dpr = devicePixelRatio || 1;
+  if (cv.width !== Math.round(w * dpr) || cv.height !== Math.round(h * dpr)){ cv.width = Math.round(w * dpr); cv.height = Math.round(h * dpr); }
+  const g = cv.getContext('2d');
+  g.setTransform(dpr, 0, 0, dpr, 0, 0);
+  g.clearRect(0, 0, w, h);
+  return {g, w, h};
+}
+// 三軸圖：0 在中間，縱軸依 3 秒內最大絕對值自動縮放，紅色虛線是 ±量程
+function drawXYZ(d, cv, ks, range, minS, title, unit, dec){
+  if (!cv.clientWidth) return;
+  const {g, w, h} = prepCanvas(cv);
+  const span = Math.min(RING, Math.max(50, d.rate * 3));
+  const at = i => (d.rp - span + i + RING) % RING;
+  let m = 0;
+  for (const k of ks) for (let i = 0; i < span; i++){ const v = Math.abs(d.ring[k][at(i)]); if (v > m) m = v; }
+  const s = Math.max(minS, m * 1.15), mid = (h + 12) / 2, amp = (h - 16) / 2;
+  const Y = v => mid - Math.max(-1, Math.min(1, v / s)) * amp;
+  g.strokeStyle = colors.l; g.lineWidth = 1;
+  g.beginPath(); g.moveTo(0, mid); g.lineTo(w, mid); g.stroke();
+  if (range <= s){
+    g.strokeStyle = colors.b; g.setLineDash([4, 3]);
+    for (const r of [range, -range]){ g.beginPath(); g.moveTo(0, Y(r)); g.lineTo(w, Y(r)); g.stroke(); }
+    g.setLineDash([]);
+  }
+  ks.forEach((k, j) => {
+    g.strokeStyle = colors.xyz[j]; g.lineWidth = 1.4; g.beginPath();
+    for (let i = 0; i < span; i++){
+      const x = i / (span - 1) * w, y = Y(d.ring[k][at(i)]);
+      i ? g.lineTo(x, y) : g.moveTo(x, y);
+    }
+    g.stroke();
+  });
+  g.font = '10px sans-serif'; g.fillStyle = colors.m;
+  g.fillText(`${title} ±${s.toFixed(dec)} ${unit}`, 4, 10);
+}
+try { matchMedia('(prefers-color-scheme: dark)').addEventListener('change', readColors); } catch(e){}
+let lastDraw = 0;
+function draw(ts){
+  requestAnimationFrame(draw);
+  if (ts - lastDraw < 66) return;
+  lastDraw = ts;
+  if (!colors) readColors();
+  const mode = $('#view').value;
+  for (const d of devices){
+    const moving = performance.now() - d.moveT < 500;
+    if (d.el.classList.contains('moving') !== moving){
+      d.el.classList.toggle('moving', moving);
+      d.q('.shake').hidden = !moving;
+    }
+    if (mode === 'xyz'){
+      drawXYZ(d, d.q('.c1'), [0, 1, 2], d.accR, 1.5, '加速度', 'g', 1);
+      drawXYZ(d, d.q('.c2'), [3, 4, 5], d.gyrR, 100, '角速度', '°/s', 0);
+      continue;
+    }
+    const {g, w, h} = prepCanvas(d.q('.c1'));
+    const span = Math.min(RING, Math.max(50, d.rate * 3));
+    const at = i => (d.rp - span + i + RING) % RING;
+    // 縱軸自動縮放：依畫面上 3 秒內的最大值，紅色虛線是感測器量程上限
+    let mw = 0, ma = 0;
+    for (let i = 0; i < span; i++){ const k = at(i); if (d.ring[7][k] > mw) mw = d.ring[7][k]; if (d.ring[6][k] > ma) ma = d.ring[6][k]; }
+    const sW = Math.max(100, mw * 1.15), sA = Math.max(1.5, ma * 1.15);
+    const Y = (v, s) => h - 2 - Math.min(1, v / s) * (h - 16);
+    const line = (ring, s, col) => {
+      g.strokeStyle = col; g.lineWidth = 1.5; g.beginPath();
+      for (let i = 0; i < span; i++){
+        const x = i / (span - 1) * w, y = Y(ring[at(i)], s);
+        i ? g.lineTo(x, y) : g.moveTo(x, y);
+      }
+      g.stroke();
+    };
+    const limit = (v, s, col) => {
+      if (v > s) return;
+      g.strokeStyle = col; g.lineWidth = 1; g.setLineDash([4, 3]);
+      g.beginPath(); g.moveTo(0, Y(v, s)); g.lineTo(w, Y(v, s)); g.stroke();
+      g.setLineDash([]);
+    };
+    limit(d.gyrR, sW, colors.b);
+    limit(d.accR, sA, colors.b);
+    line(d.ring[7], sW, colors.g);
+    line(d.ring[6], sA, colors.a);
+    g.font = '10px sans-serif'; g.fillStyle = colors.m;
+    g.fillText(`|ω| 上緣 ${sW.toFixed(0)}°/s · |a| 上緣 ${sA.toFixed(1)}g`, 4, 10);
+  }
+}
+requestAnimationFrame(draw);
+
+// ---------- 記錄 ----------
+async function toggleRec(){
+  const b = $('#rec');
+  if (!recording){
+    if (!devices.length){ alert('請先新增感測器'); return; }
+    const unset = devices.filter(d => d.label === LABELS[0]).map(d => d.tag);
+    const seen = {}, dup = [];
+    for (const d of devices){ if (d.label !== LABELS[0] && d.label !== '其他'){ if (seen[d.label]) dup.push(`${seen[d.label]} 和 ${d.tag} 都是「${d.label}」`); else seen[d.label] = d.tag; } }
+    const warns = [];
+    if (unset.length) warns.push(`${unset.join('、')} 還沒選位置`);
+    if (dup.length) warns.push(dup.join('；'));
+    if (warns.length && !confirm(warns.join('\n') + '\n\n仍要開始記錄嗎？')) return;
+    if (!rows.length){ t0 = performance.now(); recStartDate = new Date(); }
+    $('#undo').hidden = true; backup = null;
+    take++;
+    for (const d of devices){ d.peakA = 0; d.peakW = 0; }
+    recording = true;
+    b.textContent = '■ 停止記錄';
+    b.classList.add('recing');
+    try { if (navigator.wakeLock) wakeLock = await navigator.wakeLock.request('screen'); } catch(e){}
+    log(`開始第 ${take} 段`);
+  } else {
+    recording = false;
+    b.textContent = '● 開始記錄';
+    b.classList.remove('recing');
+    try { if (wakeLock) { await wakeLock.release(); wakeLock = null; } } catch(e){}
+    log(`停止第 ${take} 段，累計 ${rows.length} 筆`);
+  }
+  updateRecInfo();
+}
+function addMark(){
+  if (!recording) return;
+  marks++;
+  rows.push([take, 'MARK', '標記' + marks, performance.now() - t0, '', '', '', '', '', '', '', '', '', '']);
+  log('標記 ' + marks);
+}
+function updateRecInfo(){
+  const el = $('#recInfo');
+  if (!rows.length && !recording){ el.textContent = '尚未記錄'; return; }
+  const last = rows.length ? rows[rows.length - 1][3] / 1000 : 0;
+  el.textContent = `${recording ? '記錄中' : '已停止'} · 第 ${take} 段 · ${rows.length} 筆 · ${last.toFixed(1)} 秒` + (marks ? ` · ${marks} 個標記` : '') + (recording ? '' : ' · 記得在重新整理前匯出');
+}
+
+// 檔名只用英數、底線、減號，避免透過 LINE / email / 壓縮檔傳送時變亂碼
+function cleanPart(s){ return (s || '').trim().replace(/\s+/g, '-').replace(/[^A-Za-z0-9_-]/g, ''); }
+function stamp(t){
+  const p = n => String(n).padStart(2, '0');
+  return {date:`${t.getFullYear()}${p(t.getMonth()+1)}${p(t.getDate())}`, time:`${p(t.getHours())}${p(t.getMinutes())}`,
+          iso:`${t.getFullYear()}-${p(t.getMonth()+1)}-${p(t.getDate())} ${p(t.getHours())}:${p(t.getMinutes())}:${p(t.getSeconds())}`};
+}
+function takeRange(){
+  if (!rows.length) return 'T0';
+  const lo = rows[0][0], hi = rows[rows.length - 1][0];   // 段次依序遞增
+  return lo === hi ? `T${lo}` : `T${lo}-${hi}`;
+}
+// 桿數選單：1-10、11-20 … 91-100，以及自訂
+const SWING_STEP = 10, SWING_GROUPS = 10;
+function initSwing(){
+  const sel = $('#swing');
+  for (let i = 0; i < SWING_GROUPS; i++){
+    const a = i * SWING_STEP + 1, b = (i + 1) * SWING_STEP;
+    sel.add(new Option(`第 ${a}-${b} 桿`, `${a}-${b}`));
+  }
+  sel.add(new Option('自訂條件', 'custom'));
+}
+const isCustom = () => $('#swing').value === 'custom';
+// 檔名用：sw01-10、sw11-20…（補零讓檔名排序正確）
+function condPart(){
+  if (isCustom()) return cleanPart($('#cond').value) || 'na';
+  const [a, b] = $('#swing').value.split('-');
+  return `sw${a.padStart(2, '0')}-${b}`;
+}
+function condLabel(){ return isCustom() ? ($('#cond').value || '').trim() : `${$('#swing').value}桿`; }
+function fileName(){
+  const s = stamp(recStartDate || new Date());
+  return `${cleanPart($('#subj').value) || 'P00'}_${s.date}_${s.time}_${condPart()}_${takeRange()}.csv`;
+}
+function updateFileName(){
+  $('#condWrap').hidden = !isCustom();
+  $('#fnPreview').textContent = fileName();
+  const ids = isCustom() ? ['#subj', '#cond'] : ['#subj'];
+  const bad = ids.some(id => cleanPart($(id).value) !== ($(id).value || '').trim().replace(/\s+/g, '-'));
+  $('#fnWarn').textContent = bad ? '（中文與符號不會放進檔名，請用英數字，例如 P03、driver）' : '';
+  try {
+    localStorage.setItem('subj', $('#subj').value);
+    localStorage.setItem('cond', $('#cond').value);
+    localStorage.setItem('swing', $('#swing').value);
+  } catch(e){}
+}
+function nextSwing(){
+  const sel = $('#swing');
+  if (isCustom() || sel.selectedIndex >= SWING_GROUPS - 1) return;
+  sel.selectedIndex++;
+}
+
+function csvText(){
+  const s = stamp(recStartDate || new Date());
+  const head0 = `# subject=${($('#subj').value || '').trim()},condition=${condLabel()},start=${s.iso},exported=${stamp(new Date()).iso},takes=${takeRange()}`;
+  const meta = [head0].concat(devices.map(d => `# ${d.tag},${d.name},${d.label},acc=${d.accR}g,gyro=${d.gyrR}dps,rate=${d.rate}Hz,clip_acc=${d.clipA},clip_gyro=${d.clipG}${d.info ? ',' + d.info.replace(/,/g, ' ') : ''}`));
+  const head = 'take,sensor,label,phone_ms,sample_idx,dev_count,ax_g,ay_g,az_g,gx_dps,gy_dps,gz_dps,saturated,raw_hex';
+  const f = (v, k) => v === '' ? '' : v.toFixed(k);
+  const body = rows.map(r => [r[0], r[1], r[2], r[3].toFixed(1), r[4], r[5],
+    f(r[6],4), f(r[7],4), f(r[8],4), f(r[9],2), f(r[10],2), f(r[11],2), r[12], r[13]].join(','));
+  return meta.concat([head], body).join('\n');
+}
+function csvBlob(){ return new Blob(['﻿' + csvText()], {type:'text/csv'}); }
+function canExport(){
+  if (!rows.length){ alert('沒有資料'); return false; }
+  if (recording){ alert('請先停止記錄再匯出'); return false; }
+  if (!cleanPart($('#subj').value) && !confirm('還沒填受試者代號，檔名會用 P00。仍要匯出嗎？')) return false;
+  return true;
+}
+// 匯出後清除；保留一份備份，按「復原」可以拿回來
+function afterExport(name){
+  log('已匯出 ' + name);
+  if (!$('#autoClear').checked) return;
+  backup = {rows, take, marks, recStartDate, t0, swing: $('#swing').value};
+  rows = []; take = 0; marks = 0; recStartDate = null;
+  nextSwing();
+  for (const d of devices){ d.idx = 0; d.clipA = 0; d.clipG = 0; d.peakA = 0; d.peakW = 0; }
+  $('#csvOut').hidden = true;
+  $('#undo').hidden = false;
+  updateRecInfo(); updateFileName();
+}
+function undoClear(){
+  if (!backup) return;
+  if (rows.length && !confirm('目前已有新資料，復原會把它們覆蓋掉，確定嗎？')) return;
+  ({rows, take, marks, recStartDate, t0} = backup);
+  $('#swing').value = backup.swing;
+  backup = null;
+  $('#undo').hidden = true;
+  updateRecInfo(); updateFileName();
+}
+function download(){
+  if (!canExport()) return;
+  const name = fileName();
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(csvBlob());
+  a.download = name;
+  document.body.appendChild(a); a.click(); a.remove();
+  setTimeout(() => URL.revokeObjectURL(a.href), 5000);
+  afterExport(name);
+}
+async function share(){
+  if (!canExport()) return;
+  try {
+    const name = fileName();
+    const file = new File([csvBlob()], name, {type:'text/csv'});
+    if (navigator.canShare && navigator.canShare({files:[file]})){
+      await navigator.share({files:[file], title:name});
+      afterExport(name);
+    } else { alert('這個瀏覽器不支援分享檔案，請用「下載 CSV」或「顯示文字」'); }
+  } catch(e){ log('分享取消或失敗：' + e.message); }
+}
+function showText(){
+  const t = $('#csvOut');
+  t.hidden = !t.hidden;
+  if (!t.hidden){ t.value = csvText(); t.select(); }
+}
+function clearData(){
+  if (recording){ alert('請先停止記錄'); return; }
+  if (rows.length && !confirm(`清除 ${rows.length} 筆資料？`)) return;
+  rows = []; take = 0; marks = 0; recStartDate = null; backup = null;
+  for (const d of devices){ d.idx = 0; d.clipA = 0; d.clipG = 0; d.peakA = 0; d.peakW = 0; }
+  $('#csvOut').hidden = true;
+  $('#undo').hidden = true;
+  updateRecInfo(); updateFileName();
+}
+
+function showBanner(){
+  const b = $('#banner');
+  b.style.display = 'block';
+  b.textContent = !window.isSecureContext
+    ? '網頁必須用 https:// 開啟才能使用藍牙。'
+    : '這個瀏覽器不支援網頁藍牙。iPhone 請用 Bluefy 開啟這個網址；電腦請用 Chrome 或 Edge。示範模式仍可使用。';
+}
+if (!navigator.bluetooth || !window.isSecureContext) showBanner();
+window.addEventListener('beforeunload', e => { if (rows.length){ e.preventDefault(); e.returnValue = ''; } });
+
+$('#add').onclick = addSensor;
+$('#demo').onclick = addDemo;
+$('#rec').onclick = toggleRec;
+$('#mark').onclick = addMark;
+$('#dl').onclick = download;
+$('#share').onclick = share;
+$('#show').onclick = showText;
+$('#clear').onclick = clearData;
+$('#undo').onclick = undoClear;
+initSwing();
+try {
+  $('#subj').value = localStorage.getItem('subj') || '';
+  $('#cond').value = localStorage.getItem('cond') || '';
+  const sw = localStorage.getItem('swing');
+  if (sw && [...$('#swing').options].some(o => o.value === sw)) $('#swing').value = sw;
+} catch(e){}
+$('#subj').oninput = updateFileName;
+$('#cond').oninput = updateFileName;
+$('#swing').onchange = updateFileName;
+updateFileName();
+</script>
+</body>
+</html>
