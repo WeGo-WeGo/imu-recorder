@@ -467,7 +467,8 @@ function removeDevice(d){
   if (d.timer) clearInterval(d.timer);
   try { if (d.dev && d.dev.gatt.connected) d.dev.gatt.disconnect(); } catch(e){}
   d.el.remove();
-  devices.splice(devices.indexOf(d), 1);
+  const i = devices.indexOf(d);
+  if (i >= 0) devices.splice(i, 1);   // 連按兩次「移除」時不會誤刪其他感測器
 }
 
 const sleep = ms => new Promise(r => setTimeout(r, ms));
