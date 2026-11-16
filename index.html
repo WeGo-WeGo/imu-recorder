@@ -66,7 +66,28 @@ textarea{width:100%;height:160px;font:11px ui-monospace,Menlo,monospace;backgrou
 </head>
 <body>
 <h1>多顆 IMU 記錄器</h1>
+<div id="jsState" class="panel warn small">程式載入中…如果這行一直不消失，代表瀏覽器沒有執行網頁程式，請截圖這個畫面。</div>
+<div id="jsErr" class="panel bad small" style="display:none;white-space:pre-wrap;word-break:break-all"></div>
 <div id="banner" class="panel bad"></div>
+<script>
+// 錯誤回報（刻意用最舊的語法寫，確保任何瀏覽器都能執行）：把程式錯誤直接顯示在畫面上
+(function(){
+  function show(msg){
+    var b = document.getElementById('jsErr');
+    if (!b) return;
+    if (!b.textContent) b.textContent = '瀏覽器：' + navigator.userAgent + '\n';
+    b.style.display = 'block';
+    b.textContent += msg + '\n';
+  }
+  window.addEventListener('error', function(e){
+    show('程式錯誤：' + (e.message || e.type) + (e.lineno ? '（第 ' + e.lineno + ' 行，第 ' + e.colno + ' 字）' : ''));
+  });
+  window.addEventListener('unhandledrejection', function(e){
+    var r = e.reason;
+    show('非同步錯誤：' + (r && (r.name + ' ' + r.message) || r));
+  });
+})();
+</script>
 
 <div class="panel">
   <div class="row">
@@ -124,6 +145,8 @@ textarea{width:100%;height:160px;font:11px ui-monospace,Menlo,monospace;backgrou
 <details class="panel"><summary>除錯紀錄</summary><pre id="log"></pre></details>
 
 <script>
+// 全部程式包在獨立範圍裡，不建立全域變數，避免和 Bluefy 等瀏覽器注入的程式名稱衝突
+(function(){
 'use strict';
 const $ = s => document.querySelector(s);
 
@@ -839,6 +862,10 @@ $('#subj').oninput = updateFileName;
 $('#cond').oninput = updateFileName;
 $('#swing').onchange = updateFileName;
 updateFileName();
+$('#jsState').hidden = true;
+// 只給除錯測試用
+window.__imu = {devices, addDemo, csvText, fileName, toggleRec, download, undoClear, addSensor};
+})();
 </script>
 </body>
 </html>
